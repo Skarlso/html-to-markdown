@@ -33,7 +33,10 @@ import (
 type simpleRuleFunc func(content string, selec *goquery.Selection, options *Options) *string
 type ruleFunc func(content string, selec *goquery.Selection, options *Options) (res AdvancedResult, skip bool)
 
+// BeforeHook runs before the converter and can be used to transform the original html
 type BeforeHook func(selec *goquery.Selection)
+
+// Afterhook runs after the converter and can be used to transform the resulting markdown
 type Afterhook func(markdown string) string
 
 // Converter is initialized by NewConverter.
@@ -93,6 +96,10 @@ func validateOptions(opt Options) error {
 	return nil
 }
 
+var (
+	attrListPrefix = "data-converter-list-prefix"
+)
+
 // NewConverter initializes a new converter and holds all the rules.
 // - `domain` is used for links and images to convert relative urls ("/image.png") to absolute urls.
 // - CommonMark is the default set of rules. Set enableCommonmark to false if you want
@@ -107,7 +114,15 @@ func NewConverter(domain string, enableCommonmark bool, options *Options) *Conve
 
 	conv.before = append(conv.before, func(selec *goquery.Selection) {
 		selec.Find("a[href]").Each(func(i int, s *goquery.Selection) {
+			// TODO: don't hardcode "data-index" and rename it to avoid accidental conflicts
 			s.SetAttr("data-index", strconv.Itoa(i+1))
+		})
+	})
+	conv.before = append(conv.before, func(selec *goquery.Selection) {
+		selec.Find("li").Each(func(i int, s *goquery.Selection) {
+			prefix := getListPrefix(options, s)
+
+			s.SetAttr(attrListPrefix, prefix)
 		})
 	})
 	conv.after = append(conv.after, func(markdown string) string {
@@ -203,7 +218,7 @@ func wrap(simple simpleRuleFunc) ruleFunc {
 	}
 }
 
-// Before registers a hook that is run before the convertion. It
+// Before registers a hook that is run before the conversion. It
 // can be used to transform the original goquery html document.
 //
 // For example, the default before hook adds an index to every link,
@@ -219,7 +234,7 @@ func (conv *Converter) Before(hooks ...BeforeHook) *Converter {
 	return conv
 }
 
-// After registers a hook that is run after the convertion. It
+// After registers a hook that is run after the conversion. It
 // can be used to transform the markdown document that is about to be returned.
 //
 // For example, the default after hook trims the returned markdown.
@@ -324,11 +339,20 @@ var netClient = &http.Client{
 
 // DomainFromURL returns `u.Host` from the parsed url.
 func DomainFromURL(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return ""
+	rawURL = strings.TrimSpace(rawURL)
+
+	u, _ := url.Parse(rawURL)
+	if u != nil && u.Host != "" {
+		return u.Host
 	}
-	return u.Host
+
+	// lets try it again by adding a scheme
+	u, _ = url.Parse("http://" + rawURL)
+	if u != nil {
+		return u.Host
+	}
+
+	return ""
 }
 
 // Reduce many newline characters `\n` to at most 2 new line characters.

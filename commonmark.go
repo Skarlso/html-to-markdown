@@ -2,10 +2,11 @@ package md
 
 import (
 	"fmt"
+	"unicode"
+
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/JohannesKaufmann/html-to-markdown/escape"
@@ -22,7 +23,7 @@ var commonmark = []Rule{
 
 			// we have a nested list, were the ul/ol is inside a list item
 			// -> based on work done by @requilence from @anytypeio
-			if parent.Is("li") && parent.Children().Last().IsSelection(selec) {
+			if (parent.Is("li") || parent.Is("ul") || parent.Is("ol")) && parent.Children().Last().IsSelection(selec) {
 				// add a line break prefix if the parent's text node doesn't have it.
 				// that makes sure that every list item is on its on line
 				lastContentTextNode := strings.TrimRight(parent.Nodes[0].FirstChild.Data, " \t")
@@ -48,21 +49,28 @@ var commonmark = []Rule{
 				return nil
 			}
 
-			parent := selec.Parent()
-			index := selec.Index()
-
-			var prefix string
-			if parent.Is("ol") {
-				prefix = strconv.Itoa(index+1) + ". "
-			} else {
-				prefix = opt.BulletListMarker + " "
-			}
 			// remove leading newlines
 			content = leadingNewlinesR.ReplaceAllString(content, "")
 			// replace trailing newlines with just a single one
 			content = trailingNewlinesR.ReplaceAllString(content, "\n")
-			// indent
-			content = indentR.ReplaceAllString(content, "\n    ")
+			// remove leading spaces
+			content = strings.TrimLeft(content, " ")
+
+			prefix := selec.AttrOr(attrListPrefix, "")
+
+			// `prefixCount` is not nessesarily the length of the empty string `prefix`
+			// but how much space is reserved for the prefixes of the siblings.
+			prefixCount, previousPrefixCounts := countListParents(opt, selec)
+
+			// if the prefix is not needed, balance it by adding the usual prefix spaces
+			if prefix == "" {
+				prefix = strings.Repeat(" ", prefixCount)
+			}
+			// indent the prefix so that the nested links are represented
+			indent := strings.Repeat(" ", previousPrefixCounts)
+			prefix = indent + prefix
+
+			content = IndentMultiLineListItem(opt, content, prefixCount+previousPrefixCounts)
 
 			return String(prefix + content + "\n")
 		},
@@ -81,6 +89,12 @@ var commonmark = []Rule{
 			text = multipleSpacesR.ReplaceAllString(text, " ")
 
 			text = escape.MarkdownCharacters(text)
+
+			// if its inside a list, trim the spaces to not mess up the indentation
+			if IndexWithText(selec) == 0 && (selec.Parent().Is("li") || selec.Parent().Is("ol") || selec.Parent().Is("ul")) {
+				text = strings.Trim(text, ` `)
+			}
+
 			return &text
 		},
 	},
@@ -110,10 +124,12 @@ var commonmark = []Rule{
 			content = strings.Replace(content, "\n", " ", -1)
 			content = strings.Replace(content, "\r", " ", -1)
 			content = strings.Replace(content, `#`, `\#`, -1)
+			content = strings.TrimSpace(content)
 
 			insideLink := selec.ParentsFiltered("a").Length() > 0
 			if insideLink {
 				text := opt.StrongDelimiter + content + opt.StrongDelimiter
+				text = AddSpaceIfNessesary(selec, text)
 				return &text
 			}
 
@@ -134,7 +150,6 @@ var commonmark = []Rule{
 			}
 
 			prefix := strings.Repeat("#", level)
-			content = strings.TrimSpace(content)
 			text := "\n\n" + prefix + " " + content + "\n\n"
 			return &text
 		},
@@ -218,6 +233,8 @@ var commonmark = []Rule{
 			var title string
 			if t, ok := selec.Attr("title"); ok {
 				t = strings.Replace(t, "\n", " ", -1)
+				// escape all quotes
+				t = strings.Replace(t, `"`, `\"`, -1)
 				title = fmt.Sprintf(` "%s"`, t)
 			}
 
@@ -266,7 +283,13 @@ var commonmark = []Rule{
 	{
 		Filter: []string{"code"},
 		Replacement: func(_ string, selec *goquery.Selection, opt *Options) *string {
-			code := selec.Text()
+			code := getHTML(selec)
+
+			// Newlines in the text aren't great, since this is inline code and not a code block.
+			// Newlines will be stripped anyway in the browser, but it won't be recognized as code
+			// from the markdown parser when there is more than one newline.
+			// So limit to
+			code = multipleNewLinesRegex.ReplaceAllString(code, "\n")
 
 			fenceChar := '`'
 			maxCount := calculateCodeFenceOccurrences(fenceChar, code)
@@ -285,6 +308,7 @@ var commonmark = []Rule{
 
 			// TODO: configure delimeter in options?
 			text := fence + code + fence
+			text = AddSpaceIfNessesary(selec, text)
 			return &text
 		},
 	},
@@ -295,9 +319,9 @@ var commonmark = []Rule{
 			language := codeElement.AttrOr("class", "")
 			language = strings.Replace(language, "language-", "", 1)
 
-			code := codeElement.Text()
+			code := getHTML(codeElement)
 			if codeElement.Length() == 0 {
-				code = selec.Text()
+				code = getHTML(selec)
 			}
 
 			fenceChar, _ := utf8.DecodeRuneInString(opt.Fence)
